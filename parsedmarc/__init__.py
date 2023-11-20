@@ -13,11 +13,11 @@ import shutil
 import tempfile
 import xml.parsers.expat as expat
 import zipfile
+import zlib
 from base64 import b64decode
 from collections import OrderedDict
 from csv import DictWriter
 from datetime import datetime
-from gzip import GzipFile
 from io import BytesIO, StringIO
 from typing import Callable
 
@@ -34,7 +34,7 @@ from parsedmarc.utils import is_outlook_msg, convert_outlook_msg
 from parsedmarc.utils import parse_email
 from parsedmarc.utils import timestamp_to_human, human_timestamp_to_datetime
 
-__version__ = "8.4.0"
+__version__ = "8.6.4"
 
 logger.debug("parsedmarc v{0}".format(__version__))
 
@@ -119,7 +119,7 @@ def _parse_report_record(record, ip_db_path=None, offline=False,
     new_record["alignment"]["dkim"] = dkim_aligned
     new_record["alignment"]["dmarc"] = dmarc_aligned
     if "reason" in policy_evaluated:
-        if type(policy_evaluated["reason"]) == list:
+        if type(policy_evaluated["reason"]) is list:
             reasons = policy_evaluated["reason"]
         else:
             reasons = [policy_evaluated["reason"]]
@@ -128,9 +128,12 @@ def _parse_report_record(record, ip_db_path=None, offline=False,
             reason["comment"] = None
     new_policy_evaluated["policy_override_reasons"] = reasons
     new_record["policy_evaluated"] = new_policy_evaluated
-    new_record["identifiers"] = record["identifiers"].copy()
+    if "identities" in record:
+        new_record["identifiers"] = record["identities"].copy()
+    else:
+        new_record["identifiers"] = record["identifiers"].copy()
     new_record["auth_results"] = OrderedDict([("dkim", []), ("spf", [])])
-    if type(new_record["identifiers"]["header_from"]) == str:
+    if type(new_record["identifiers"]["header_from"]) is str:
         lowered_from = new_record["identifiers"]["header_from"].lower()
     else:
         lowered_from = ''
@@ -144,7 +147,7 @@ def _parse_report_record(record, ip_db_path=None, offline=False,
     else:
         auth_results = new_record["auth_results"].copy()
 
-    if type(auth_results["dkim"]) != list:
+    if not isinstance(auth_results["dkim"], list):
         auth_results["dkim"] = [auth_results["dkim"]]
     for result in auth_results["dkim"]:
         if "domain" in result and result["domain"] is not None:
@@ -159,24 +162,27 @@ def _parse_report_record(record, ip_db_path=None, offline=False,
                 new_result["result"] = "none"
             new_record["auth_results"]["dkim"].append(new_result)
 
-    if type(auth_results["spf"]) != list:
+    if not isinstance(auth_results["spf"], list):
         auth_results["spf"] = [auth_results["spf"]]
     for result in auth_results["spf"]:
-        new_result = OrderedDict([("domain", result["domain"])])
-        if "scope" in result and result["scope"] is not None:
-            new_result["scope"] = result["scope"]
-        else:
-            new_result["scope"] = "mfrom"
-        if "result" in result and result["result"] is not None:
-            new_result["result"] = result["result"]
-        else:
-            new_result["result"] = "none"
-        new_record["auth_results"]["spf"].append(new_result)
+        if "domain" in result and result["domain"] is not None:
+            new_result = OrderedDict([("domain", result["domain"])])
+            if "scope" in result and result["scope"] is not None:
+                new_result["scope"] = result["scope"]
+            else:
+                new_result["scope"] = "mfrom"
+            if "result" in result and result["result"] is not None:
+                new_result["result"] = result["result"]
+            else:
+                new_result["result"] = "none"
+            new_record["auth_results"]["spf"].append(new_result)
 
     if "envelope_from" not in new_record["identifiers"]:
         envelope_from = None
         if len(auth_results["spf"]) > 0:
-            envelope_from = new_record["auth_results"]["spf"][-1]["domain"]
+            spf_result = auth_results["spf"][-1]
+            if "domain" in spf_result:
+                envelope_from = spf_result["domain"]
         if envelope_from is not None:
             envelope_from = str(envelope_from).lower()
         new_record["identifiers"]["envelope_from"] = envelope_from
@@ -208,7 +214,7 @@ def parse_aggregate_report_xml(xml, ip_db_path=None, offline=False,
         ip_db_path (str): Path to a MMDB file from MaxMind or DBIP
         offline (bool): Do not query online for geolocation or DNS
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         timeout (float): Sets the DNS timeout in seconds
         parallel (bool): Parallel processing
         keep_alive (callable): Keep alive function
@@ -251,7 +257,16 @@ def parse_aggregate_report_xml(xml, ip_db_path=None, offline=False,
                     "email"].split("@")[-1]
         org_name = report_metadata["org_name"]
         if org_name is not None and " " not in org_name:
-            org_name = get_base_domain(org_name)
+            new_org_name = get_base_domain(org_name)
+            if new_org_name is not None:
+                org_name = new_org_name
+        if not org_name:
+            logger.debug("Could not parse org_name from XML.\r\n{0}".format(
+                report.__str__()
+            ))
+            raise KeyError("Organization name is missing. \
+                           This field is a requirement for \
+                           saving the report")
         new_report_metadata["org_name"] = org_name
         new_report_metadata["org_email"] = report_metadata["email"]
         extra = None
@@ -264,12 +279,15 @@ def parse_aggregate_report_xml(xml, ip_db_path=None, offline=False,
                                       "").replace(">", "").split("@")[0]
         new_report_metadata["report_id"] = report_id
         date_range = report["report_metadata"]["date_range"]
+        if int(date_range["end"]) - int(date_range["begin"]) > 2*86400:
+            _error = "Timespan > 24 hours - RFC 7489 section 7.2"
+            errors.append(_error)
         date_range["begin"] = timestamp_to_human(date_range["begin"])
         date_range["end"] = timestamp_to_human(date_range["end"])
         new_report_metadata["begin_date"] = date_range["begin"]
         new_report_metadata["end_date"] = date_range["end"]
         if "error" in report["report_metadata"]:
-            if type(report["report_metadata"]["error"]) != list:
+            if not isinstance(report["report_metadata"]["error"], list):
                 errors = [report["report_metadata"]["error"]]
             else:
                 errors = report["report_metadata"]["error"]
@@ -307,7 +325,7 @@ def parse_aggregate_report_xml(xml, ip_db_path=None, offline=False,
         new_policy_published["fo"] = fo
         new_report["policy_published"] = new_policy_published
 
-        if type(report["record"]) == list:
+        if type(report["record"]) is list:
             for i in range(len(report["record"])):
                 if keep_alive is not None and i > 0 and i % 20 == 0:
                     logger.debug("Sending keepalive cmd")
@@ -362,20 +380,22 @@ def extract_xml(input_):
         str: The extracted XML
 
     """
-    if type(input_) == str:
-        file_object = open(input_, "rb")
-    elif type(input_) == bytes:
-        file_object = BytesIO(input_)
-    else:
-        file_object = input_
     try:
+        if type(input_) is str:
+            file_object = open(input_, "rb")
+        elif type(input_) is bytes:
+            file_object = BytesIO(input_)
+        else:
+            file_object = input_
+
         header = file_object.read(6)
         file_object.seek(0)
         if header.startswith(MAGIC_ZIP):
             _zip = zipfile.ZipFile(file_object)
             xml = _zip.open(_zip.namelist()[0]).read().decode(errors='ignore')
         elif header.startswith(MAGIC_GZIP):
-            xml = GzipFile(fileobj=file_object).read().decode(errors='ignore')
+            xml = zlib.decompress(file_object.getvalue(),
+                                  zlib.MAX_WBITS | 16).decode(errors='ignore')
         elif header.startswith(MAGIC_XML):
             xml = file_object.read().decode(errors='ignore')
         else:
@@ -384,6 +404,8 @@ def extract_xml(input_):
 
         file_object.close()
 
+    except FileNotFoundError:
+        raise InvalidAggregateReport("File was not found")
     except UnicodeDecodeError:
         file_object.close()
         raise InvalidAggregateReport("File objects must be opened in binary "
@@ -409,7 +431,7 @@ def parse_aggregate_report_file(_input, offline=False, ip_db_path=None,
         offline (bool): Do not query online for geolocation or DNS
         ip_db_path (str): Path to a MMDB file from MaxMind or DBIP
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         dns_timeout (float): Sets the DNS timeout in seconds
         parallel (bool): Parallel processing
         keep_alive (callable): Keep alive function
@@ -444,7 +466,7 @@ def parsed_aggregate_reports_to_csv_rows(reports):
     def to_str(obj):
         return str(obj).lower()
 
-    if type(reports) == OrderedDict:
+    if type(reports) is OrderedDict:
         reports = [reports]
 
     rows = []
@@ -582,10 +604,10 @@ def parse_forensic_report(feedback_report, sample, msg_date,
         sample (str): The RFC 822 headers or RFC 822 message sample
         msg_date (str): The message's date header
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         dns_timeout (float): Sets the DNS timeout in seconds
         strip_attachment_payloads (bool): Remove attachment payloads from
-        forensic report results
+            forensic report results
         parallel (bool): Parallel processing
 
     Returns:
@@ -700,7 +722,7 @@ def parsed_forensic_reports_to_csv_rows(reports):
     Returns:
         list: Parsed forensic report data as a list of dicts in flat CSV format
     """
-    if type(reports) == OrderedDict:
+    if type(reports) is OrderedDict:
         reports = [reports]
 
     rows = []
@@ -772,7 +794,7 @@ def parse_report_email(input_, offline=False, ip_db_path=None,
         nameservers (list): A list of one or more nameservers to use
         dns_timeout (float): Sets the DNS timeout in seconds
         strip_attachment_payloads (bool): Remove attachment payloads from
-        forensic report results
+            forensic report results
         parallel (bool): Parallel processing
         keep_alive (callable): keep alive function
 
@@ -786,7 +808,7 @@ def parse_report_email(input_, offline=False, ip_db_path=None,
     try:
         if is_outlook_msg(input_):
             input_ = convert_outlook_msg(input_)
-        if type(input_) == bytes:
+        if type(input_) is bytes:
             input_ = input_.decode(encoding="utf8", errors="replace")
         msg = mailparser.parse_from_string(input_)
         msg_headers = json.loads(msg.headers_json)
@@ -808,7 +830,7 @@ def parse_report_email(input_, offline=False, ip_db_path=None,
     for part in msg.walk():
         content_type = part.get_content_type()
         payload = part.get_payload()
-        if type(payload) != list:
+        if not isinstance(payload, list):
             payload = [payload]
         payload = payload[0].__str__()
         if content_type == "message/feedback-report":
@@ -914,10 +936,10 @@ def parse_report_file(input_, nameservers=None, dns_timeout=2.0,
     Args:
         input_: A path to a file, a file like object, or bytes
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         dns_timeout (float): Sets the DNS timeout in seconds
         strip_attachment_payloads (bool): Remove attachment payloads from
-        forensic report results
+            forensic report results
         ip_db_path (str): Path to a MMDB file from MaxMind or DBIP
         offline (bool): Do not make online queries for geolocation or DNS
         parallel (bool): Parallel processing
@@ -926,10 +948,10 @@ def parse_report_file(input_, nameservers=None, dns_timeout=2.0,
     Returns:
         OrderedDict: The parsed DMARC report
     """
-    if type(input_) == str:
+    if type(input_) is str:
         logger.debug("Parsing {0}".format(input_))
         file_object = open(input_, "rb")
-    elif type(input_) == bytes:
+    elif type(input_) is bytes:
         file_object = BytesIO(input_)
     else:
         file_object = input_
@@ -974,16 +996,16 @@ def get_dmarc_reports_from_mbox(input_, nameservers=None, dns_timeout=2.0,
     Args:
         input_: A path to a mbox file
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         dns_timeout (float): Sets the DNS timeout in seconds
         strip_attachment_payloads (bool): Remove attachment payloads from
-        forensic report results
+            forensic report results
         ip_db_path (str): Path to a MMDB file from MaxMind or DBIP
         offline (bool): Do not make online queries for geolocation or DNS
         parallel (bool): Parallel processing
 
     Returns:
-        OrderedDict: Lists of  ``aggregate_reports`` and ``forensic_reports``
+        OrderedDict: Lists of ``aggregate_reports`` and ``forensic_reports``
 
     """
     aggregate_reports = []
@@ -1048,12 +1070,12 @@ def get_dmarc_reports_from_mailbox(connection: MailboxConnection,
         nameservers (list): A list of DNS nameservers to query
         dns_timeout (float): Set the DNS query timeout
         strip_attachment_payloads (bool): Remove attachment payloads from
-          forensic report results
+            forensic report results
         results (dict): Results from the previous run
         batch_size (int): Number of messages to read and process before saving
             (use 0 for no limit)
         create_folders (bool): Whether to create the destination folders
-          (not used in watch)
+            (not used in watch)
 
     Returns:
         OrderedDict: Lists of ``aggregate_reports`` and ``forensic_reports``
@@ -1230,14 +1252,14 @@ def watch_inbox(mailbox_connection: MailboxConnection,
         delete (bool): Delete  messages after processing them
         test (bool): Do not move or delete messages after processing them
         check_timeout (int): Number of seconds to wait for a IMAP IDLE response
-          or the number of seconds until the next mail check
+            or the number of seconds until the next mail check
         ip_db_path (str): Path to a MMDB file from MaxMind or DBIP
         offline (bool): Do not query online for geolocation or DNS
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         dns_timeout (float): Set the DNS query timeout
         strip_attachment_payloads (bool): Replace attachment payloads in
-        forensic report samples with None
+            forensic report samples with None
         batch_size (int): Number of messages to read and process before saving
     """
 
@@ -1262,7 +1284,7 @@ def watch_inbox(mailbox_connection: MailboxConnection,
 
 
 def append_json(filename, reports):
-    with open(filename, "r+", newline="\n", encoding="utf-8") as output:
+    with open(filename, "a+", newline="\n", encoding="utf-8") as output:
         output_json = json.dumps(reports, ensure_ascii=False, indent=2)
         if output.seek(0, os.SEEK_END) != 0:
             if len(reports) == 0:
@@ -1285,7 +1307,7 @@ def append_json(filename, reports):
 
 
 def append_csv(filename, csv):
-    with open(filename, "r+", newline="\n", encoding="utf-8") as output:
+    with open(filename, "a+", newline="\n", encoding="utf-8") as output:
         if output.seek(0, os.SEEK_END) != 0:
             # strip the headers from the CSV
             _headers, csv = csv.split("\n", 1)
@@ -1425,7 +1447,7 @@ def email_results(results, host, mail_from, mail_to,
         password (str): An optional password
         subject (str): Overrides the default message subject
         attachment_filename (str): Override the default attachment filename
-        message (str: Override the default plain text body
+        message (str): Override the default plain text body
     """
     logger.debug("Emailing report to: {0}".format(",".join(mail_to)))
     date_string = datetime.now().strftime("%Y-%m-%d")
