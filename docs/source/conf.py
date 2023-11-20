@@ -19,8 +19,8 @@ from parsedmarc import __version__
 # -- Project information -----------------------------------------------------
 
 project = 'parsedmarc'
-copyright = '2018, Sean Whalen'
-author = 'Sean Whalen'
+copyright = '2018 - 2023, Sean Whalen and contributors'
+author = 'Sean Whalen and contributors'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -82,6 +82,10 @@ exclude_patterns = []
 # a list of builtin themes.
 #
 html_theme = 'sphinx_rtd_theme'
+
+html_theme_options = {
+    'globaltoc_collapse': False
+}
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

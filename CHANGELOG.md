@@ -1,6 +1,52 @@
 Changelog
 =========
 
+8.6.4
+----
+
+- Properly process aggregate reports that incorrectly call `identifiers` `identities`
+- Ignore SPF results in aggregate report records if the domain is not provided
+
+8.6.3
+-----
+
+- Add an error message instead of raising an exception when an aggregate report time span is greater than 24 hours
+
+8.6.2
+-----
+
+- Use `zlib` instead of `Gzip` to decompress more `.gz` files, including the ones supplied by Mimecast (Based on #430 closes #429)
+
+8.6.1
+-----
+
+- Fix handling of non-domain organization names (PR #411 fixes issue #410)
+- Skip processing of aggregate reports with a date range that is too long to be valid (PR #408 fixes issue #282)
+- Better error handeling for Elasticsearch queries and file parsing (PR #417)
+
+8.6.0
+-----
+
+- Replace publicsuffix2 with publicsuffixlist
+
+8.5.0
+-----
+
+- Add support for Azure Log Analytics (PR #394)
+- Fix a bug in the Microsoft Graph integration that caused a crash when an inbox has 10+ folders (PR #398)
+- Documentation fixes
+
+8.4.2
+-----
+
+- Only initialize the syslog, S3 and Kafka clients once (PR #386 closes issues #289 and #380)
+
+8.4.1
+-----
+
+- Fix bug introduced in 8.3.1 that caused `No such file or directory` errors if output files didn't exist (PR #385 closes issues #358 and #382)
+- Make the `--silent` CLI option only print errors. Add the `--warnings` options to also print warnings (PR #383)
+
 8.4.0
 -----
 

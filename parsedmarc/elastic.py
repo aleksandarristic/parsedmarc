@@ -181,7 +181,7 @@ def set_hosts(hosts, use_ssl=False, ssl_cert_path=None,
         password (str): The password to use for authentication
         timeout (float): Timeout in seconds
     """
-    if type(hosts) != list:
+    if not isinstance(hosts, list):
         hosts = [hosts]
     conn_params = {
         "hosts": hosts,
@@ -327,7 +327,12 @@ def save_aggregate_report_to_elasticsearch(aggregate_report,
     query = query & begin_date_query & end_date_query
     search.query = query
 
-    existing = search.execute()
+    try:
+        existing = search.execute()
+    except Exception as error_:
+        raise ElasticsearchError("Elasticsearch's search for existing report \
+            error: {}".format(error_.__str__()))
+
     if len(existing) > 0:
         raise AlreadySaved("An aggregate report ID {0} from {1} about {2} "
                            "with a date range of {3} UTC to {4} UTC already "

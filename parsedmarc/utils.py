@@ -13,7 +13,6 @@ import mailparser
 import json
 import hashlib
 import base64
-import platform
 import atexit
 import mailbox
 import re
@@ -29,16 +28,11 @@ import dns.resolver
 import dns.exception
 import geoip2.database
 import geoip2.errors
-import requests
-import publicsuffix2
+import publicsuffixlist
 
 from parsedmarc.log import logger
-import parsedmarc.resources
+import parsedmarc.resources.dbip
 
-USER_AGENT = "Mozilla/5.0 (({0} {1})) parsedmarc".format(
-            platform.system(),
-            platform.release(),
-        )
 
 parenthesis_regex = re.compile(r'\s*\(.*\)\s*')
 
@@ -83,7 +77,7 @@ def decode_base64(data):
     return base64.b64decode(data)
 
 
-def get_base_domain(domain, use_fresh_psl=False):
+def get_base_domain(domain):
     """
     Gets the base domain name for the given domain
 
@@ -93,41 +87,13 @@ def get_base_domain(domain, use_fresh_psl=False):
 
     Args:
         domain (str): A domain or subdomain
-        use_fresh_psl (bool): Download a fresh Public Suffix List
 
     Returns:
         str: The base domain of the given domain
 
     """
-    psl_path = os.path.join(tempdir, "public_suffix_list.dat")
-
-    def download_psl():
-        url = "https://publicsuffix.org/list/public_suffix_list.dat"
-        # Use a browser-like user agent string to bypass some proxy blocks
-        headers = {"User-Agent": USER_AGENT}
-        try:
-            fresh_psl = requests.get(url, headers=headers).text
-            with open(psl_path, "w", encoding="utf-8") as fresh_psl_file:
-                fresh_psl_file.write(fresh_psl)
-        except Exception as error:
-            raise DownloadError(
-                "Failed to download an updated PSL {0}".format(error))
-
-    if use_fresh_psl:
-        if not os.path.exists(psl_path):
-            download_psl()
-        else:
-            psl_age = datetime.now() - datetime.fromtimestamp(
-                os.stat(psl_path).st_mtime)
-            if psl_age > timedelta(hours=24):
-                download_psl()
-
-        with open(psl_path, encoding="utf-8") as psl_file:
-            psl = publicsuffix2.PublicSuffixList(psl_file)
-
-        return psl.get_public_suffix(domain)
-    else:
-        return publicsuffix2.get_sld(domain)
+    psl = publicsuffixlist.PublicSuffixList()
+    return psl.privatesuffix(domain)
 
 
 def query_dns(domain, record_type, cache=None, nameservers=None, timeout=2.0):
@@ -139,7 +105,7 @@ def query_dns(domain, record_type, cache=None, nameservers=None, timeout=2.0):
         record_type (str): The record type to query for
         cache (ExpiringDict): Cache storage
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         timeout (float): Sets the DNS timeout in seconds
 
     Returns:
@@ -188,7 +154,7 @@ def get_reverse_dns(ip_address, cache=None, nameservers=None, timeout=2.0):
         ip_address (str): The IP address to resolve
         cache (ExpiringDict): Cache storage
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         timeout (float): Sets the DNS query timeout in seconds
 
     Returns:
@@ -209,13 +175,13 @@ def get_reverse_dns(ip_address, cache=None, nameservers=None, timeout=2.0):
 
 def timestamp_to_datetime(timestamp):
     """
-    Converts a UNIX/DMARC timestamp to a Python ``DateTime`` object
+    Converts a UNIX/DMARC timestamp to a Python ``datetime`` object
 
     Args:
         timestamp (int): The timestamp
 
     Returns:
-        DateTime: The converted timestamp as a Python ``DateTime`` object
+        datetime: The converted timestamp as a Python ``datetime`` object
     """
     return datetime.fromtimestamp(int(timestamp))
 
@@ -235,14 +201,14 @@ def timestamp_to_human(timestamp):
 
 def human_timestamp_to_datetime(human_timestamp, to_utc=False):
     """
-    Converts a human-readable timestamp into a Python ``DateTime`` object
+    Converts a human-readable timestamp into a Python ``datetime`` object
 
     Args:
         human_timestamp (str): A timestamp string
         to_utc (bool): Convert the timestamp to UTC
 
     Returns:
-        DateTime: The converted timestamp
+        datetime: The converted timestamp
     """
 
     human_timestamp = human_timestamp.replace("-0000", "")
@@ -306,7 +272,7 @@ def get_ip_address_country(ip_address, db_path=None):
                 break
 
     if db_path is None:
-        with pkg_resources.path(parsedmarc.resources,
+        with pkg_resources.path(parsedmarc.resources.dbip,
                                 "dbip-country-lite.mmdb") as path:
             db_path = path
 
@@ -338,7 +304,7 @@ def get_ip_address_info(ip_address, ip_db_path=None, cache=None, offline=False,
         cache (ExpiringDict): Cache storage
         offline (bool): Do not make online queries for geolocation or DNS
         nameservers (list): A list of one or more nameservers to use
-        (Cloudflare's public DNS resolvers by default)
+            (Cloudflare's public DNS resolvers by default)
         timeout (float): Sets the DNS timeout in seconds
         parallel (bool): parallel processing
 
@@ -392,6 +358,7 @@ def parse_email_address(original_address):
 def get_filename_safe_string(string):
     """
     Converts a string to a string that is safe for a filename
+
     Args:
         string (str): A string to make safe for a filename
 
@@ -413,13 +380,13 @@ def get_filename_safe_string(string):
 
 def is_mbox(path):
     """
-    Checks if the given content is a MBOX mailbox file
+    Checks if the given content is an MBOX mailbox file
 
     Args:
         path: Content to check
 
     Returns:
-        bool: A flag the indicates if a file is a MBOX mailbox file
+        bool: A flag that indicates if the file is an MBOX mailbox file
     """
     _is_mbox = False
     try:
@@ -434,15 +401,15 @@ def is_mbox(path):
 
 def is_outlook_msg(content):
     """
-    Checks if the given content is a Outlook msg OLE file
+    Checks if the given content is an Outlook msg OLE/MSG file
 
     Args:
         content: Content to check
 
     Returns:
-        bool: A flag the indicates if a file is a Outlook MSG file
+        bool: A flag that indicates if the file is an Outlook MSG file
     """
-    return type(content) == bytes and content.startswith(
+    return isinstance(content, bytes) and content.startswith(
         b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
 
 
@@ -488,10 +455,11 @@ def parse_email(data, strip_attachment_payloads=False):
         data: The RFC 822 message string, or MSG binary
         strip_attachment_payloads (bool): Remove attachment payloads
 
-    Returns (dict): Parsed email data
+    Returns:
+        dict: Parsed email data
     """
 
-    if type(data) == bytes:
+    if isinstance(data, bytes):
         if is_outlook_msg(data):
             data = convert_outlook_msg(data)
         data = data.decode("utf-8", errors="replace")
